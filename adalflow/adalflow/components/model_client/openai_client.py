@@ -64,6 +64,23 @@ def get_first_message_content(completion: ChatCompletion) -> str:
 # def _get_chat_completion_usage(completion: ChatCompletion) -> OpenAICompletionUsage:
 #     return completion.usage
 
+# A simple heuristic to estimate token count for estimating number of tokens in a Streaming response
+def estimate_token_count(text: str) -> int:
+    """
+    Estimate the token count of a given text.
+
+    Args:
+        text (str): The text to estimate token count for.
+
+    Returns:
+        int: Estimated token count.
+    """
+    # Split the text into tokens using spaces as a simple heuristic
+    tokens = text.split()
+
+    # Return the number of tokens
+    return len(tokens)
+
 
 def parse_stream_response(completion: ChatCompletionChunk) -> str:
     r"""Parse the response of the stream API."""
@@ -155,6 +172,7 @@ class OpenAIClient(ModelClient):
             chat_completion_parser or get_first_message_content
         )
         self._input_type = input_type
+        self._api_kwargs = {} # add api kwargs when the OpenAI Client is called
 
     def init_sync_client(self):
         api_key = self._api_key or os.getenv("OPENAI_API_KEY")
@@ -207,10 +225,34 @@ class OpenAIClient(ModelClient):
                 total_tokens=completion.usage.total_tokens,
             )
             return usage
-        else:
-            raise NotImplementedError(
-                "streaming completion usage tracking is not implemented"
+        elif isinstance(completion, Stream):
+            # Streaming response
+            completion_tokens = 0
+            prompt_tokens = 0
+
+            for message in self._api_kwargs.get("messages", []):
+                # add to prompt_tokens if the message role is 'system' which contains system prompt 
+                if message.get("role") == "system": 
+                    content = message.get("content", '') 
+                    prompt_tokens += estimate_token_count(content)
+                    break 
+
+            for chunk in completion:
+                if hasattr(chunk.choices[0].delta, "content"):
+                    # Estimate token count from streamed content
+                    completion_tokens += estimate_token_count(parse_stream_response(chunk))
+            # Since prompt tokens are known in advance, retrieve from model kwargs or a known value
+            total_tokens = prompt_tokens + completion_tokens
+
+            usage: CompletionUsage = CompletionUsage(
+                completion_tokens=completion_tokens,
+                prompt_tokens=prompt_tokens,
+                total_tokens=total_tokens,
             )
+            return usage
+
+        else:
+            raise ValueError(f"Unsupported completion type: {type(completion)}")
 
     def parse_embedding_response(
         self, response: CreateEmbeddingResponse
@@ -362,6 +404,7 @@ class OpenAIClient(ModelClient):
         kwargs is the combined input and model_kwargs.  Support streaming call.
         """
         log.info(f"api_kwargs: {api_kwargs}")
+        self._api_kwargs = api_kwargs
         if model_type == ModelType.EMBEDDER:
             return self.sync_client.embeddings.create(**api_kwargs)
         elif model_type == ModelType.LLM:
@@ -403,6 +446,8 @@ class OpenAIClient(ModelClient):
         """
         kwargs is the combined input and model_kwargs
         """
+        # store the api kwargs in the client 
+        self._api_kwargs = api_kwargs
         if self.async_client is None:
             self.async_client = self.init_async_client()
         if model_type == ModelType.EMBEDDER:
@@ -501,18 +546,21 @@ class OpenAIClient(ModelClient):
 # if __name__ == "__main__":
 #     from adalflow.core import Generator
 #     from adalflow.utils import setup_env, get_logger
-#
+
 #     log = get_logger(level="DEBUG")
-#
-#     setup_env()
+
+#     # setup_env()
 #     prompt_kwargs = {"input_str": "What is the meaning of life?"}
-#
+
 #     gen = Generator(
-#         model_client=OpenAIClient(),
+#         model_client=OpenAIClient(), 
 #         model_kwargs={"model": "gpt-3.5-turbo", "stream": True},
 #     )
 #     gen_response = gen(prompt_kwargs)
 #     print(f"gen_response: {gen_response}")
-#
-#     for genout in gen_response.data:
+
+#     print(f"gen_response.data: {gen_response.data}")
+#     print(f"gen_response.raw_response: {gen_response.raw_response}")    
+
+#     for genout in gen_response.raw_response:
 #         print(f"genout: {genout}")
